@@ -147,7 +147,7 @@ def _call(system: str, user: str, max_tokens: int = 600, retries: int = 2) -> st
     raise AIServiceError(
         f"{_provider.upper()} didn't respond after {retries + 1} tries "
         f"(likely temporarily overloaded or a connection issue). "
-        f"Try again in a moment, or switch providers with menu option 12.\n"
+        f"Try again in a moment, or switch providers via Settings > Switch AI provider.\n"
         f"Underlying error: {last_error}"
     )
 

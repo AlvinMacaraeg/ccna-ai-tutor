@@ -28,20 +28,70 @@ def print_menu():
 
     print(f"\n=== CCNA Tutor === [AI: {ai.get_provider().upper()}]")
     print(streak_line)
-    print("1. Quiz me (spaced repetition)")
-    print("2. Explain a topic")
-    print("3. Flashcard mode")
-    print("4. Comparison drill (X vs Y)")
-    print("5. CLI command practice")
-    print("6. Packet Tracer lab")
-    print("7. Troubleshooting case")
-    print("8. Real-world scenario")
-    print("9. Mock exam (timed)")
-    print("10. View progress")
-    print("11. Review mistakes")
-    print("12. Backup / restore progress")
-    print("13. Switch AI provider (Claude / Gemini / Groq)")
-    print("14. Quit")
+    print("1. Study")
+    print("2. Hands-on Practice")
+    print("3. Mock Exam (timed)")
+    print("4. Progress & History")
+    print("5. Settings")
+    print("6. Quit")
+
+
+def run_submenu(title: str, options: list):
+    """
+    Generic submenu loop: shows a titled list of (label, function) pairs, runs whichever
+    one is picked, and loops until the user backs out to the main menu. Keeps the four
+    category menus below from each duplicating the same loop/back/error-handling logic.
+    """
+    while True:
+        print(f"\n=== {title} ===")
+        for i, (label, _) in enumerate(options, 1):
+            print(f"  {i}. {label}")
+        print("  0. Back to main menu")
+        choice = input("> ").strip().lower()
+
+        if choice in ("0", "", "b", "back"):
+            return
+
+        if choice.isdigit() and 1 <= int(choice) <= len(options):
+            try:
+                options[int(choice) - 1][1]()
+            except ai.AIServiceError as e:
+                print(f"\n⚠️  {e}")
+                print("Back to the menu — nothing was lost, try again when ready.")
+        else:
+            print("Invalid choice.")
+
+
+def study_menu():
+    run_submenu("Study", [
+        ("Quiz me (spaced repetition)", quiz_flow),
+        ("Explain a topic", explain_flow),
+        ("Flashcard mode", flashcard_flow),
+        ("Comparison drill (X vs Y)", comparison_drill_flow),
+    ])
+
+
+def hands_on_menu():
+    run_submenu("Hands-on Practice", [
+        ("CLI command practice", cli_practice_flow),
+        ("Packet Tracer lab", packet_tracer_lab_flow),
+        ("Troubleshooting case", troubleshooting_flow),
+        ("Real-world scenario", realworld_scenario_flow),
+    ])
+
+
+def progress_menu():
+    run_submenu("Progress & History", [
+        ("View progress", progress_flow),
+        ("Review mistakes", review_mistakes_flow),
+        ("Backup / restore progress", backup_restore_flow),
+    ])
+
+
+def settings_menu():
+    run_submenu("Settings", [
+        ("Switch AI provider (Claude / Gemini / Groq)", switch_provider_flow),
+    ])
 
 
 def switch_provider_flow():
@@ -614,41 +664,25 @@ def main():
     while True:
         print_menu()
         choice = input("> ").strip()
-        try:
-            if choice == "1":
-                quiz_flow()
-            elif choice == "2":
-                explain_flow()
-            elif choice == "3":
-                flashcard_flow()
-            elif choice == "4":
-                comparison_drill_flow()
-            elif choice == "5":
-                cli_practice_flow()
-            elif choice == "6":
-                packet_tracer_lab_flow()
-            elif choice == "7":
-                troubleshooting_flow()
-            elif choice == "8":
-                realworld_scenario_flow()
-            elif choice == "9":
+        if choice == "1":
+            study_menu()
+        elif choice == "2":
+            hands_on_menu()
+        elif choice == "3":
+            try:
                 mock_exam_flow()
-            elif choice == "10":
-                progress_flow()
-            elif choice == "11":
-                review_mistakes_flow()
-            elif choice == "12":
-                backup_restore_flow()
-            elif choice == "13":
-                switch_provider_flow()
-            elif choice == "14":
-                print("Good luck studying. Bye!")
-                break
-            else:
-                print("Invalid choice.")
-        except ai.AIServiceError as e:
-            print(f"\n⚠️  {e}")
-            print("Back to the menu — nothing was lost, try again when ready.")
+            except ai.AIServiceError as e:
+                print(f"\n⚠️  {e}")
+                print("Back to the menu — nothing was lost, try again when ready.")
+        elif choice == "4":
+            progress_menu()
+        elif choice == "5":
+            settings_menu()
+        elif choice == "6":
+            print("Good luck studying. Bye!")
+            break
+        else:
+            print("Invalid choice.")
 
 
 if __name__ == "__main__":
