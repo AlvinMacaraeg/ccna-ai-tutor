@@ -79,6 +79,13 @@ def _call_gemini(system: str, user: str, max_tokens: int) -> str:
     Supports both Google Python SDKs so this works regardless of which one you installed:
       - google-genai      (current, recommended — 'from google import genai')
       - google-generativeai (older/legacy — 'import google.generativeai as genai')
+
+    thinking_config is used to stop the model from spending its token budget on invisible
+    reasoning (which otherwise truncates long answers) — but it's been an active source of
+    400 INVALID_ARGUMENT errors across the ecosystem whenever Google swaps the model behind
+    the 'gemini-flash-latest' alias, since not every model version supports it the same way.
+    So: try WITH it first (better output when it works), and if that specific param causes
+    a failure, silently retry the same request WITHOUT it rather than failing the whole call.
     """
     api_key = os.environ.get("GEMINI_API_KEY")
     try:
@@ -87,16 +94,27 @@ def _call_gemini(system: str, user: str, max_tokens: int) -> str:
         global _gemini_client
         if _gemini_client is None:
             _gemini_client = genai.Client(api_key=api_key)
-        resp = _gemini_client.models.generate_content(
-            model=GEMINI_MODEL,
-            contents=user,
-            config=types.GenerateContentConfig(
-                system_instruction=system,
-                max_output_tokens=max_tokens,
-                thinking_config=types.ThinkingConfig(thinking_budget=0),
-            ),
-        )
-        return _clean_gemini_text(resp.text.strip())
+
+        def _do_call(use_thinking_config: bool):
+            config_kwargs = {"system_instruction": system, "max_output_tokens": max_tokens}
+            if use_thinking_config:
+                config_kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=0)
+            resp = _gemini_client.models.generate_content(
+                model=GEMINI_MODEL,
+                contents=user,
+                config=types.GenerateContentConfig(**config_kwargs),
+            )
+            return resp.text.strip()
+
+        try:
+            result = _do_call(use_thinking_config=True)
+        except Exception as e:
+            if "INVALID_ARGUMENT" in str(e) or "400" in str(e):
+                result = _do_call(use_thinking_config=False)  # retry without the problem param
+            else:
+                raise
+        return _clean_gemini_text(result)
+
     except ImportError:
         import google.generativeai as genai_legacy
         genai_legacy.configure(api_key=api_key)
@@ -190,7 +208,7 @@ def grade_answer(topic: str, question: str, answer: str) -> dict:
         "2 = correct and sufficiently complete for CCNA level."
     )
     user = f"Topic: {topic}\nQuestion: {question}\nStudent's answer: {answer}"
-    raw = _call(system, user, max_tokens=350)
+    raw = _call(system, user, max_tokens=700)
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
@@ -209,7 +227,7 @@ def explain_topic(topic: str, depth: str = "normal", past_mistakes=None, follow_
             "You are a CCNA exam tutor. Answer the student's question clearly and precisely, "
             "at CCNA candidate level. Use a real-world analogy if it helps clarify. No fluff."
         )
-        return _call(system, follow_up, max_tokens=700)
+        return _call(system, follow_up, max_tokens=1200)
 
     depth_instructions = {
         "quick": (
@@ -278,7 +296,7 @@ def grade_cli_commands(topic: str, scenario: str, commands: str) -> dict:
         "2 = correct and would accomplish the task on a real device."
     )
     user = f"Topic: {topic}\nTask: {scenario}\nStudent's commands:\n{commands}"
-    raw = _call(system, user, max_tokens=400)
+    raw = _call(system, user, max_tokens=700)
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
@@ -298,7 +316,7 @@ def generate_troubleshooting_case(topic: str) -> str:
         "Do NOT reveal the root cause or the fix — the student has to find it. "
         "Output ONLY the scenario, symptom, and command output. No preamble, no answer, no hints."
     )
-    return _call(system, f"Topic: {topic}", max_tokens=600)
+    return _call(system, f"Topic: {topic}", max_tokens=1500)
 
 
 def grade_troubleshooting_answer(topic: str, scenario: str, answer: str) -> dict:
@@ -317,7 +335,7 @@ def grade_troubleshooting_answer(topic: str, scenario: str, answer: str) -> dict
         "2 = correctly identified root cause and a working fix."
     )
     user = f"Topic: {topic}\nScenario:\n{scenario}\n\nStudent's diagnosis and fix:\n{answer}"
-    raw = _call(system, user, max_tokens=400)
+    raw = _call(system, user, max_tokens=700)
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
@@ -346,7 +364,7 @@ def generate_realworld_scenario(topic: str) -> str:
         "Pick whichever style fits the topic most naturally. Output ONLY the scenario and question "
         "— no preamble, no answer, no hint about which style you picked, no markdown headers."
     )
-    return _call(system, f"Topic: {topic}", max_tokens=700)
+    return _call(system, f"Topic: {topic}", max_tokens=1500)
 
 
 def grade_realworld_scenario(topic: str, scenario: str, answer: str) -> dict:
@@ -364,7 +382,7 @@ def grade_realworld_scenario(topic: str, scenario: str, answer: str) -> dict:
         "2 = correct and well-reasoned."
     )
     user = f"Topic: {topic}\nScenario:\n{scenario}\n\nStudent's answer:\n{answer}"
-    raw = _call(system, user, max_tokens=400)
+    raw = _call(system, user, max_tokens=700)
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
@@ -422,7 +440,7 @@ def grade_comparison_answer(topic_a: str, topic_b: str, question: str, answer: s
         "2 = correctly captured the real distinguishing factor."
     )
     user = f"Comparing: {topic_a} vs {topic_b}\nQuestion: {question}\nStudent's answer: {answer}"
-    raw = _call(system, user, max_tokens=350)
+    raw = _call(system, user, max_tokens=700)
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
@@ -473,7 +491,7 @@ def generate_packet_tracer_lab(topic: str, mastery: str) -> str:
         f"{scaffold_guidance.get(mastery, scaffold_guidance['beginner'])}\n\n"
         "Output ONLY the lab brief — topology + instructions — nothing else. No preamble, no answer key."
     )
-    return _call(system, f"Topic: {topic}", max_tokens=700)
+    return _call(system, f"Topic: {topic}", max_tokens=2000)
 
 
 def generate_lab_retrieval_questions(topic: str, lab_brief: str) -> str:
