@@ -21,7 +21,7 @@ from pathlib import Path
 from topics import TOPICS, default_topic_row
 
 DB_PATH = Path(__file__).parent / "progress.db"
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 def get_conn():
@@ -179,6 +179,26 @@ def _migrate_to_v3(conn):
     _set_schema_version(conn, 3)
 
 
+def _migrate_to_v4(conn):
+    """v3 -> v4: adds lab_flags, where you record mistakes you caught in AI-generated labs,
+    scenarios or grades. Recent notes get fed back into future lab generation as 'known
+    pitfalls', so the same mistake isn't repeated."""
+    cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS lab_flags (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            topic_id INTEGER REFERENCES topics(id),
+            mode TEXT,
+            brief TEXT,
+            note TEXT,
+            timestamp TEXT
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_lab_flags_topic_id ON lab_flags(topic_id)")
+    conn.commit()
+    _set_schema_version(conn, 4)
+
+
 def _migrate_if_needed(conn):
     version = _get_schema_version(conn)
     if version < 1:
@@ -190,7 +210,10 @@ def _migrate_if_needed(conn):
     if version < 3:
         _migrate_to_v3(conn)
         version = 3
-    # Future schema changes: add `if version < 4: _migrate_to_v4(conn)` etc. here.
+    if version < 4:
+        _migrate_to_v4(conn)
+        version = 4
+    # Future schema changes: add `if version < 5: _migrate_to_v5(conn)` etc. here.
 
 
 def _get_or_create_topic_id(conn, name: str) -> int:
@@ -470,6 +493,64 @@ def get_lab_history(limit: int = 10):
     return rows
 
 
+def log_lab_flag(topic: str, mode: str, brief: str, note: str):
+    """Record a mistake the student caught in a generated lab/scenario/grade."""
+    conn = get_conn()
+    topic_id = _get_or_create_topic_id(conn, topic)
+    conn.execute(
+        """INSERT INTO lab_flags (topic_id, mode, brief, note, timestamp)
+           VALUES (?, ?, ?, ?, ?)""",
+        (topic_id, mode, brief, note, date.today().isoformat()),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_known_pitfalls(topic: str, limit: int = 5):
+    """
+    Recent reported mistakes to warn the generators about: this topic's first, then the most
+    recent from other topics (platform-level mistakes, like a command a switch model doesn't
+    support, apply across topics). De-duplicated; at most `limit` entries.
+    """
+    conn = get_conn()
+    topic_id = _get_or_create_topic_id(conn, topic)
+    same = conn.execute(
+        """SELECT topics.name AS topic, lf.note FROM lab_flags lf
+           JOIN topics ON topics.id = lf.topic_id
+           WHERE lf.topic_id = ? ORDER BY lf.id DESC LIMIT ?""",
+        (topic_id, limit),
+    ).fetchall()
+    other = conn.execute(
+        """SELECT topics.name AS topic, lf.note FROM lab_flags lf
+           JOIN topics ON topics.id = lf.topic_id
+           WHERE lf.topic_id != ? ORDER BY lf.id DESC LIMIT ?""",
+        (topic_id, limit),
+    ).fetchall()
+    conn.close()
+
+    seen, out = set(), []
+    for r in list(same) + list(other):
+        note = (r["note"] or "").strip()
+        if note and note not in seen:
+            seen.add(note)
+            out.append(f"({r['topic']}) {note}")
+        if len(out) >= limit:
+            break
+    return out
+
+
+def get_flag_history(limit: int = 20):
+    conn = get_conn()
+    rows = conn.execute(
+        """SELECT topics.name AS topic, lf.mode, lf.note, lf.timestamp
+           FROM lab_flags lf JOIN topics ON topics.id = lf.topic_id
+           ORDER BY lf.id DESC LIMIT ?""",
+        (limit,),
+    ).fetchall()
+    conn.close()
+    return rows
+
+
 def get_streak_info():
     """
     Current & longest study streaks, derived from days with any logged activity.
@@ -478,11 +559,13 @@ def get_streak_info():
     conn = get_conn()
     rows1 = conn.execute("SELECT DISTINCT timestamp FROM session_log").fetchall()
     rows2 = conn.execute("SELECT DISTINCT timestamp FROM mock_exam_log").fetchall()
+    rows3 = conn.execute("SELECT DISTINCT timestamp FROM lab_flags").fetchall()  # flagging a lab is studying too
     conn.close()
 
     all_dates = sorted(
         {date.fromisoformat(r["timestamp"]) for r in rows1}
         | {date.fromisoformat(r["timestamp"]) for r in rows2}
+        | {date.fromisoformat(r["timestamp"]) for r in rows3}
     )
 
     if not all_dates:
@@ -530,6 +613,9 @@ def export_backup(filepath: str):
         "lab_reflections": [dict(r) for r in conn.execute(
             "SELECT topics.name AS topic, lr.* FROM lab_reflections lr JOIN topics ON topics.id = lr.topic_id"
         )],
+        "lab_flags": [dict(r) for r in conn.execute(
+            "SELECT topics.name AS topic, lf.* FROM lab_flags lf JOIN topics ON topics.id = lf.topic_id"
+        )],
     }
     conn.close()
     with open(filepath, "w") as f:
@@ -550,6 +636,7 @@ def import_backup(filepath: str):
     conn.execute("DELETE FROM topic_progress")
     conn.execute("DELETE FROM mock_exam_log")
     conn.execute("DELETE FROM lab_reflections")
+    conn.execute("DELETE FROM lab_flags")
     conn.execute("DELETE FROM topics")
     conn.commit()
 
@@ -589,6 +676,14 @@ def import_backup(filepath: str):
             """INSERT INTO lab_reflections (id, topic_id, lab_brief, reflection, ai_response, timestamp)
                VALUES (?, ?, ?, ?, ?, ?)""",
             (lr["id"], topic_id, lr["lab_brief"], lr["reflection"], lr["ai_response"], lr["timestamp"]),
+        )
+
+    for lf in data.get("lab_flags", []):  # .get() -- older backups won't have this table
+        topic_id = conn.execute("SELECT id FROM topics WHERE name = ?", (lf["topic"],)).fetchone()["id"]
+        conn.execute(
+            """INSERT INTO lab_flags (id, topic_id, mode, brief, note, timestamp)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (lf["id"], topic_id, lf["mode"], lf["brief"], lf["note"], lf["timestamp"]),
         )
 
     conn.execute("PRAGMA foreign_keys = ON")

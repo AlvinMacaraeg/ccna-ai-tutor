@@ -17,12 +17,15 @@ import time
 import warnings
 import anthropic
 
+import lab_facts
+
 # These are harmless, cosmetic warnings from the underlying libraries (old Python version
 # notices, OpenSSL version notices, and Gemini's "thought_signature" internal-reasoning
 # notice) — none of them affect correctness, they just clutter the terminal. Silencing them.
 warnings.filterwarnings("ignore")
 
-CLAUDE_MODEL = "claude-haiku-4-5-20251001"
+CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "claude-haiku-4-5-20251001")
+# To try the newer, much cheaper Haiku 5.5:  export CLAUDE_MODEL=claude-haiku-5-5
 GEMINI_MODEL = "gemini-flash-latest"  # rolling alias — always points to Google's current stable Flash model,
                                        # so this won't break every time they deprecate a specific version
 GROQ_MODEL = "llama-3.3-70b-versatile"  # genuinely free tier, no card, no expiration —
@@ -48,14 +51,34 @@ def set_provider(name: str):
     _provider = name
 
 
-def _call_claude(system: str, user: str, max_tokens: int) -> str:
+def _claude_uses_adaptive_thinking() -> bool:
+    """Haiku 5.x thinks adaptively by default, and thinking tokens count toward max_tokens."""
+    return CLAUDE_MODEL.startswith("claude-haiku-5")
+
+
+def _call_claude(system: str, user: str, max_tokens: int, effort: str = None) -> str:
+    kwargs = {}
+    if _claude_uses_adaptive_thinking():
+        # Thinking tokens eat into max_tokens on these models, so a tight limit can stop a reply
+        # after the thinking and before any text. Leave headroom -- you're only billed for tokens
+        # actually produced, so unused headroom costs nothing.
+        max_tokens += 6000 if effort in ("high", "xhigh", "max") else 3000
+        if effort:
+            # extra_body passes the field straight through, so this works even if the installed
+            # anthropic SDK predates the output_config parameter.
+            kwargs["extra_body"] = {"output_config": {"effort": effort}}
     resp = _claude_client.messages.create(
         model=CLAUDE_MODEL,
         max_tokens=max_tokens,
         system=system,
         messages=[{"role": "user", "content": user}],
+        **kwargs,
     )
-    return resp.content[0].text.strip()
+    # Pick the text block by TYPE, not position: newer models can put a thinking block first.
+    text = "".join(b.text for b in resp.content if getattr(b, "type", None) == "text").strip()
+    if not text:
+        raise RuntimeError(f"Claude returned no text (stop_reason={resp.stop_reason}).")
+    return text
 
 
 def _clean_gemini_text(text: str) -> str:
@@ -131,6 +154,25 @@ class AIServiceError(Exception):
     pass
 
 
+def _parse_json_reply(raw: str) -> dict:
+    """Pull a JSON object out of a model reply. Raises AIServiceError (which the menus catch and
+    show politely) instead of crashing the app when the reply is unreadable -- e.g. cut off
+    mid-JSON."""
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        start, end = raw.find("{"), raw.rfind("}") + 1
+        if start != -1 and end > start:
+            try:
+                return json.loads(raw[start:end])
+            except json.JSONDecodeError:
+                pass
+    raise AIServiceError(
+        "The AI's reply couldn't be read (it may have been cut off). Nothing was recorded -- "
+        "just try that one again."
+    )
+
+
 def _call_groq(system: str, user: str, max_tokens: int) -> str:
     """Groq's API is OpenAI-compatible; the official 'groq' package mirrors that shape."""
     global _groq_client
@@ -148,7 +190,7 @@ def _call_groq(system: str, user: str, max_tokens: int) -> str:
     return resp.choices[0].message.content.strip()
 
 
-def _call(system: str, user: str, max_tokens: int = 600, retries: int = 2) -> str:
+def _call(system: str, user: str, max_tokens: int = 600, retries: int = 2, effort: str = None) -> str:
     last_error = None
     for attempt in range(retries + 1):
         try:
@@ -156,7 +198,7 @@ def _call(system: str, user: str, max_tokens: int = 600, retries: int = 2) -> st
                 return _call_gemini(system, user, max_tokens)
             elif _provider == "groq":
                 return _call_groq(system, user, max_tokens)
-            return _call_claude(system, user, max_tokens)
+            return _call_claude(system, user, max_tokens, effort)
         except Exception as e:
             last_error = e
             if attempt < retries:
@@ -209,11 +251,7 @@ def grade_answer(topic: str, question: str, answer: str) -> dict:
     )
     user = f"Topic: {topic}\nQuestion: {question}\nStudent's answer: {answer}"
     raw = _call(system, user, max_tokens=700)
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError:
-        start, end = raw.find("{"), raw.rfind("}") + 1
-        return json.loads(raw[start:end])
+    return _parse_json_reply(raw)
 
 
 def explain_topic(topic: str, depth: str = "normal", past_mistakes=None, follow_up: str = None) -> str:
@@ -268,7 +306,7 @@ def explain_topic(topic: str, depth: str = "normal", past_mistakes=None, follow_
     return _call(system, user, max_tokens=2500)
 
 
-def generate_cli_scenario(topic: str) -> str:
+def generate_cli_scenario(topic: str, pitfalls=None) -> str:
     """Presents a networking task requiring actual Cisco IOS configuration commands."""
     system = (
         "You are a CCNA exam tutor running a hands-on CLI practice drill. "
@@ -278,10 +316,10 @@ def generate_cli_scenario(topic: str) -> str:
         "command sequence, but don't give the commands. "
         "Output ONLY the task description, nothing else — no preamble, no commands, no answer."
     )
-    return _call(system, f"Topic: {topic}", max_tokens=200)
+    return _call(system + "\n\n" + lab_facts.build_lab_context(topic, pitfalls), f"Topic: {topic}", max_tokens=500, effort="high")
 
 
-def grade_cli_commands(topic: str, scenario: str, commands: str) -> dict:
+def grade_cli_commands(topic: str, scenario: str, commands: str, pitfalls=None) -> dict:
     """Grades typed Cisco IOS commands against a scenario. Lenient on valid shorthand/abbreviations."""
     system = (
         "You are a CCNA exam tutor grading a student's typed Cisco IOS commands against a task. "
@@ -296,15 +334,11 @@ def grade_cli_commands(topic: str, scenario: str, commands: str) -> dict:
         "2 = correct and would accomplish the task on a real device."
     )
     user = f"Topic: {topic}\nTask: {scenario}\nStudent's commands:\n{commands}"
-    raw = _call(system, user, max_tokens=700)
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError:
-        start, end = raw.find("{"), raw.rfind("}") + 1
-        return json.loads(raw[start:end])
+    raw = _call(system + "\n\n" + lab_facts.build_grader_context(topic, pitfalls), user, max_tokens=700, effort="high")
+    return _parse_json_reply(raw)
 
 
-def generate_troubleshooting_case(topic: str) -> str:
+def generate_troubleshooting_case(topic: str, pitfalls=None) -> str:
     """Presents a broken-network scenario with realistic command output containing a hidden root cause."""
     system = (
         "You are a CCNA exam tutor creating a network troubleshooting case study. "
@@ -316,10 +350,10 @@ def generate_troubleshooting_case(topic: str) -> str:
         "Do NOT reveal the root cause or the fix — the student has to find it. "
         "Output ONLY the scenario, symptom, and command output. No preamble, no answer, no hints."
     )
-    return _call(system, f"Topic: {topic}", max_tokens=1500)
+    return _call(system + "\n\n" + lab_facts.build_lab_context(topic, pitfalls), f"Topic: {topic}", max_tokens=1500, effort="high")
 
 
-def grade_troubleshooting_answer(topic: str, scenario: str, answer: str) -> dict:
+def grade_troubleshooting_answer(topic: str, scenario: str, answer: str, pitfalls=None) -> dict:
     """Grades a student's diagnosis + proposed fix against the actual root cause."""
     system = (
         "You are a CCNA exam tutor grading a student's network troubleshooting diagnosis. "
@@ -335,15 +369,11 @@ def grade_troubleshooting_answer(topic: str, scenario: str, answer: str) -> dict
         "2 = correctly identified root cause and a working fix."
     )
     user = f"Topic: {topic}\nScenario:\n{scenario}\n\nStudent's diagnosis and fix:\n{answer}"
-    raw = _call(system, user, max_tokens=700)
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError:
-        start, end = raw.find("{"), raw.rfind("}") + 1
-        return json.loads(raw[start:end])
+    raw = _call(system + "\n\n" + lab_facts.build_grader_context(topic, pitfalls), user, max_tokens=700, effort="high")
+    return _parse_json_reply(raw)
 
 
-def generate_realworld_scenario(topic: str) -> str:
+def generate_realworld_scenario(topic: str, pitfalls=None) -> str:
     """
     Generates a practical scenario question, randomly drawing from three real CCNA-style formats:
     network topology/packet-flow diagrams, workplace triage situations, or applied design problems.
@@ -364,10 +394,10 @@ def generate_realworld_scenario(topic: str) -> str:
         "Pick whichever style fits the topic most naturally. Output ONLY the scenario and question "
         "— no preamble, no answer, no hint about which style you picked, no markdown headers."
     )
-    return _call(system, f"Topic: {topic}", max_tokens=1500)
+    return _call(system + "\n\n" + lab_facts.build_lab_context(topic, pitfalls), f"Topic: {topic}", max_tokens=1500, effort="high")
 
 
-def grade_realworld_scenario(topic: str, scenario: str, answer: str) -> dict:
+def grade_realworld_scenario(topic: str, scenario: str, answer: str, pitfalls=None) -> dict:
     """Grades a real-world scenario answer — could be a packet-flow answer, a triage decision, or a design choice."""
     system = (
         "You are a CCNA exam tutor grading a student's answer to a practical scenario question. "
@@ -382,12 +412,8 @@ def grade_realworld_scenario(topic: str, scenario: str, answer: str) -> dict:
         "2 = correct and well-reasoned."
     )
     user = f"Topic: {topic}\nScenario:\n{scenario}\n\nStudent's answer:\n{answer}"
-    raw = _call(system, user, max_tokens=700)
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError:
-        start, end = raw.find("{"), raw.rfind("}") + 1
-        return json.loads(raw[start:end])
+    raw = _call(system + "\n\n" + lab_facts.build_grader_context(topic, pitfalls), user, max_tokens=700, effort="high")
+    return _parse_json_reply(raw)
 
 
 def generate_mnemonic(topic: str) -> str:
@@ -410,11 +436,7 @@ def generate_flashcard(topic: str) -> dict:
         'Respond with ONLY valid JSON, no markdown fences: {"front": "short question", "back": "short answer"}'
     )
     raw = _call(system, f"Topic: {topic}", max_tokens=150)
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError:
-        start, end = raw.find("{"), raw.rfind("}") + 1
-        return json.loads(raw[start:end])
+    return _parse_json_reply(raw)
 
 
 def generate_comparison_question(topic_a: str, topic_b: str) -> str:
@@ -441,11 +463,7 @@ def grade_comparison_answer(topic_a: str, topic_b: str, question: str, answer: s
     )
     user = f"Comparing: {topic_a} vs {topic_b}\nQuestion: {question}\nStudent's answer: {answer}"
     raw = _call(system, user, max_tokens=700)
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError:
-        start, end = raw.find("{"), raw.rfind("}") + 1
-        return json.loads(raw[start:end])
+    return _parse_json_reply(raw)
 
 
 def check_self_explanation(topic: str, original_feedback: str, self_explanation: str) -> str:
@@ -461,7 +479,7 @@ def check_self_explanation(topic: str, original_feedback: str, self_explanation:
     return _call(system, user, max_tokens=200)
 
 
-def generate_packet_tracer_lab(topic: str, mastery: str) -> str:
+def generate_packet_tracer_lab(topic: str, mastery: str, pitfalls=None) -> str:
     """
     Generates a hands-on Packet Tracer lab brief, scaffolded by mastery level
     (Vygotsky's zone of proximal development — heavy guidance early, more
@@ -491,10 +509,10 @@ def generate_packet_tracer_lab(topic: str, mastery: str) -> str:
         f"{scaffold_guidance.get(mastery, scaffold_guidance['beginner'])}\n\n"
         "Output ONLY the lab brief — topology + instructions — nothing else. No preamble, no answer key."
     )
-    return _call(system, f"Topic: {topic}", max_tokens=2000)
+    return _call(system + "\n\n" + lab_facts.build_lab_context(topic, pitfalls), f"Topic: {topic}", max_tokens=2000, effort="high")
 
 
-def generate_lab_retrieval_questions(topic: str, lab_brief: str) -> str:
+def generate_lab_retrieval_questions(topic: str, lab_brief: str, correction: str = None) -> str:
     """
     1-2 short recall questions testing whether the student actually internalized what they
     just built — meant to be answered from memory, without looking back at Packet Tracer.
@@ -507,7 +525,13 @@ def generate_lab_retrieval_questions(topic: str, lab_brief: str) -> str:
         "questions they should be able to answer from memory, without looking back at the lab "
         "brief or Packet Tracer. Output ONLY the question(s), nothing else."
     )
-    return _call(system, f"Topic: {topic}\nLab they just completed:\n{lab_brief}", max_tokens=250)
+    user = f"Topic: {topic}\nLab they just completed:\n{lab_brief}"
+    if correction:
+        user += (
+            "\n\nThe student reported this correction to the brief above (trust it over the brief, "
+            f"and do NOT ask about anything it contradicts): {correction}"
+        )
+    return _call(system + "\n\n" + lab_facts.build_grader_context(topic), user, max_tokens=250)
 
 
 def respond_to_reflection(topic: str, reflection_answers: dict) -> str:

@@ -84,6 +84,7 @@ def progress_menu():
     run_submenu("Progress & History", [
         ("View progress", progress_flow),
         ("Review mistakes", review_mistakes_flow),
+        ("Reported lab mistakes", flags_flow),
         ("Backup / restore progress", backup_restore_flow),
     ])
 
@@ -136,6 +137,21 @@ def pick_from_list(items):
         return items[int(choice) - 1]
     print("Invalid choice.")
     return None
+
+
+def offer_flag(topic: str, mode: str, brief: str, prompt: str = None):
+    """
+    One low-friction question after any lab-style task: did the generated task, its output or its
+    grade have a mistake? Anything typed is saved and fed back into future generation as a
+    'known pitfall', so the same mistake isn't repeated. Returns the note, or None if all fine.
+    """
+    prompt = prompt or "\nSpot a mistake in that task or its grade? Type what was wrong, or press Enter if all fine: "
+    note = input(prompt).strip()
+    if not note:
+        return None
+    db.log_lab_flag(topic, mode, brief, note)
+    print("Noted — future tasks will steer away from that.")
+    return note
 
 
 def ask_and_grade(topic: str, question: str, silent: bool = False, allow_quit: bool = False,
@@ -354,7 +370,8 @@ def cli_practice_flow():
 
     print(f"\n--- CLI Practice: {topic} ---")
     print("Generating a task...")
-    scenario = ai.generate_cli_scenario(topic)
+    pitfalls = db.get_known_pitfalls(topic)
+    scenario = ai.generate_cli_scenario(topic, pitfalls=pitfalls)
     print(f"\nTask: {scenario}")
 
     print("\nType your Cisco IOS commands, one per line.")
@@ -372,7 +389,7 @@ def cli_practice_flow():
 
     commands = "\n".join(lines)
     print("\nGrading your commands...")
-    result = ai.grade_cli_commands(topic, scenario, commands)
+    result = ai.grade_cli_commands(topic, scenario, commands, pitfalls=pitfalls)
     score = result.get("score", 0)
     feedback = result.get("feedback", "")
 
@@ -380,6 +397,9 @@ def cli_practice_flow():
     print(f"\n{label}")
     print(feedback)
 
+    if offer_flag(topic, "cli_practice", scenario):
+        print("Since the task or grade was faulty, this attempt won't count toward your stats.")
+        return
     db.update_after_answer(topic, score)
     db.log_session(topic, f"[CLI PRACTICE] {scenario}", commands, score, feedback)
 
@@ -393,7 +413,8 @@ def packet_tracer_lab_flow():
     mastery = db.get_mastery_level(topic)
     print(f"\n--- Packet Tracer Lab: {topic} (scaffold level: {mastery}) ---")
     print("Generating your lab brief...")
-    lab_brief = ai.generate_packet_tracer_lab(topic, mastery)
+    pitfalls = db.get_known_pitfalls(topic)
+    lab_brief = ai.generate_packet_tracer_lab(topic, mastery, pitfalls=pitfalls)
     print(f"\n{lab_brief}")
 
     print("\nGo build this in Packet Tracer now.")
@@ -402,11 +423,19 @@ def packet_tracer_lab_flow():
         print("No worries — come back to this lab whenever you're ready.")
         return
 
+    # You just ran this in the simulator, so you're the best judge of whether the brief was right.
+    # Anything reported here is saved for future labs AND used to correct the recall questions.
+    correction = offer_flag(
+        topic, "packet_tracer_lab", lab_brief,
+        prompt="\nDid Packet Tracer disagree with the brief anywhere (a command rejected, a step that "
+               "didn't work, a check that proved nothing)?\nType what happened, or press Enter if it all worked: ",
+    )
+
     # Retrieval check — testing effect applied right after hands-on practice: answer from
     # memory, not by glancing back at Packet Tracer. This is real evidence of understanding,
     # so (unlike the post-explanation check) it DOES count toward this topic's mastery tracking.
     print("\n--- Quick Recall Check (answer from memory — don't peek at Packet Tracer!) ---")
-    questions = ai.generate_lab_retrieval_questions(topic, lab_brief)
+    questions = ai.generate_lab_retrieval_questions(topic, lab_brief, correction=correction)
     ask_and_grade(topic, questions)
 
     # Reflection — Kolb's experiential learning cycle: concrete experience -> reflective
@@ -437,7 +466,8 @@ def troubleshooting_flow():
 
     print(f"\n--- Troubleshooting Case: {topic} ---")
     print("Generating a broken-network scenario...")
-    scenario = ai.generate_troubleshooting_case(topic)
+    pitfalls = db.get_known_pitfalls(topic)
+    scenario = ai.generate_troubleshooting_case(topic, pitfalls=pitfalls)
     print(f"\n{scenario}")
 
     answer = input("\nWhat's the root cause, and how would you fix it?\n> ").strip()
@@ -446,7 +476,7 @@ def troubleshooting_flow():
         return
 
     print("\nGrading your diagnosis...")
-    result = ai.grade_troubleshooting_answer(topic, scenario, answer)
+    result = ai.grade_troubleshooting_answer(topic, scenario, answer, pitfalls=pitfalls)
     score = result.get("score", 0)
     feedback = result.get("feedback", "")
 
@@ -454,6 +484,9 @@ def troubleshooting_flow():
     print(f"\n{label}")
     print(feedback)
 
+    if offer_flag(topic, "troubleshooting", scenario):
+        print("Since the case or grade was faulty, this attempt won't count toward your stats.")
+        return
     db.update_after_answer(topic, score)
     db.log_session(topic, f"[TROUBLESHOOTING] {scenario}", answer, score, feedback)
 
@@ -466,7 +499,8 @@ def realworld_scenario_flow():
 
     print(f"\n--- Real-World Scenario: {topic} ---")
     print("Generating scenario...")
-    scenario = ai.generate_realworld_scenario(topic)
+    pitfalls = db.get_known_pitfalls(topic)
+    scenario = ai.generate_realworld_scenario(topic, pitfalls=pitfalls)
     print(f"\n{scenario}")
 
     answer = input("\nYour answer: ").strip()
@@ -475,7 +509,7 @@ def realworld_scenario_flow():
         return
 
     print("\nGrading...")
-    result = ai.grade_realworld_scenario(topic, scenario, answer)
+    result = ai.grade_realworld_scenario(topic, scenario, answer, pitfalls=pitfalls)
     score = result.get("score", 0)
     feedback = result.get("feedback", "")
 
@@ -483,6 +517,9 @@ def realworld_scenario_flow():
     print(f"\n{label}")
     print(feedback)
 
+    if offer_flag(topic, "realworld_scenario", scenario):
+        print("Since the scenario or grade was faulty, this attempt won't count toward your stats.")
+        return
     db.update_after_answer(topic, score)
     db.log_session(topic, f"[REAL-WORLD SCENARIO] {scenario}", answer, score, feedback)
 
@@ -625,6 +662,19 @@ def review_mistakes_flow():
         print(f"Q: {m['question']}")
         print(f"Your answer: {m['your_answer']}")
         print(f"Feedback: {m['feedback']}")
+
+
+def flags_flow():
+    flags = db.get_flag_history(limit=20)
+    if not flags:
+        print("\nNo lab mistakes reported yet. When a lab, scenario or grade looks wrong, report it "
+              "right after the task and it will show up here.")
+        return
+    print(f"\n=== Reported lab mistakes (latest {len(flags)}) ===")
+    for i, f in enumerate(flags, 1):
+        print(f"\n#{i} | {f['topic']} | {f['mode']} | {f['timestamp']}")
+        print(f"   {f['note']}")
+    print("\nTip: a mistake that keeps coming back belongs in lab_facts.py as a permanent fact.")
 
 
 def backup_restore_flow():

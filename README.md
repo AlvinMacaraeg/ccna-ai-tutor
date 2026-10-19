@@ -31,6 +31,7 @@ So I started building a tutor that applies actual learning science instead of ju
 - Multi-provider AI support (Claude, Gemini, Groq) — swap providers mid-session, automatic retry on failure
 - Fully normalized SQLite schema with versioned migrations, so the database structure can evolve without ever losing your study history
 - Full backup/restore, study streak tracking, and a mistake-review mode pulling your errors across every practice mode into one place
+- **Lab accuracy guardrails** — AI-generated labs, scenarios and graders are fed a hand-curated fact sheet (`lab_facts.py`: device-model limits, command prerequisites, topic facts) plus design rules that force every verification step to be falsifiable. When a lab still gets something wrong, you report it in one line; the note is stored and fed back into future generation, and the faulty attempt is kept out of your mastery stats
 
 ## Tech stack
 
@@ -46,6 +47,8 @@ pip install anthropic
 export ANTHROPIC_API_KEY='sk-ant-...'
 python3 main.py
 ```
+
+Optional: `export CLAUDE_MODEL=claude-haiku-5-5` to run on the newer, cheaper Haiku (the default stays Haiku 4.5 until you opt in).
 
 Optional: set `GEMINI_API_KEY` or `GROQ_API_KEY` to use those providers instead (switchable at runtime from the Settings menu).
 
