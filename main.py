@@ -26,7 +26,7 @@ def print_menu():
     else:
         streak_line = "No streak yet — study today to start one!"
 
-    print(f"\n=== CCNA Tutor === [AI: {ai.get_provider().upper()}]")
+    print(f"\n=== CCNA Tutor === [AI: {ai.get_provider().upper()} · {ai.get_model_label()}]")
     print(streak_line)
     print("1. Study")
     print("2. Hands-on Practice")

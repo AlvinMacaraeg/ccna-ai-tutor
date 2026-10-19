@@ -43,6 +43,11 @@ def get_provider() -> str:
     return _provider
 
 
+def get_model_label() -> str:
+    """The exact model currently answering, for display in the menu header."""
+    return {"claude": CLAUDE_MODEL, "gemini": GEMINI_MODEL, "groq": GROQ_MODEL}[_provider]
+
+
 def set_provider(name: str):
     global _provider
     name = name.lower().strip()
