@@ -1,11 +1,17 @@
-# Personal study data — don't publish your own progress/history
+# Personal study data -- never publish your own progress/history
 progress.db
-progress_backup.json
-*.json
+progress.db.bak*
+progress_backup*.json
+*.pre-restore
 
-# Python cache
+# Python
 __pycache__/
 *.pyc
+.venv/
+venv/
 
-# API keys, if you ever accidentally hardcode one instead of using env vars
+# Secrets, if one is ever hardcoded by accident instead of using env vars
 .env
+
+# macOS
+.DS_Store

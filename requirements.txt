@@ -1,0 +1,10 @@
+# Required: the Claude provider (the default).
+anthropic
+
+# Optional extras -- install only the providers you want to use.
+# Gemini provider:
+#   pip install google-genai
+# Groq provider:
+#   pip install groq
+# Nicer terminal output (NOT used by the current code; listed for planned UI work):
+#   pip install rich
